@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install XcodeGen (if project.yml exists)
+      - name: Generate Project if project.yml exists
         run: |
           if [ -f "project.yml" ]; then
             brew install xcodegen
@@ -23,13 +23,17 @@ jobs:
       - name: Build Unsigned iOS App
         run: |
           PROJECT_FILE=$(find . -maxdepth 2 -name "*.xcodeproj" | head -n 1)
-          SCHEME=$(xcodebuild -list -project "$PROJECT_FILE" | awk '/Schemes:/,0' | sed '1d' | grep -v "Watch" | head -n 1 | xargs)
-          echo "Building Project: $PROJECT_FILE | Scheme: $SCHEME"
+          echo "Available targets & schemes:"
+          xcodebuild -list -project "$PROJECT_FILE"
+          
+          TARGET=$(xcodebuild -list -project "$PROJECT_FILE" | awk '/Targets:/,/^$/' | sed '1d' | grep -vi "Watch" | grep -vi "Tests" | head -n 1 | xargs)
+          echo "Building Project: $PROJECT_FILE | Target: $TARGET"
+          
           xcodebuild -project "$PROJECT_FILE" \
-            -scheme "$SCHEME" \
+            -target "$TARGET" \
             -sdk iphoneos \
             -configuration Release \
-            -derivedDataPath build \
+            SYMROOT=$(pwd)/build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -38,7 +42,8 @@ jobs:
       - name: Package into Unsigned IPA
         run: |
           mkdir -p Payload
-          APP_PATH=$(find build/Build/Products/Release-iphoneos -name "*.app" | head -n 1)
+          APP_PATH=$(find build -name "*.app" | grep -i "Release-iphoneos" | head -n 1)
+          echo "Found app at: $APP_PATH"
           cp -r "$APP_PATH" Payload/
           zip -r OSWatchCompanion.ipa Payload
 
