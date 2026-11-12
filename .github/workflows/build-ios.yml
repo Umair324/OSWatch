@@ -13,24 +13,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate Project if project.yml exists
-        run: |
-          if [ -f "project.yml" ]; then
-            brew install xcodegen
-            xcodegen generate
-          fi
-
       - name: Build Unsigned iOS App
         run: |
-          PROJECT_FILE=$(find . -maxdepth 2 -name "*.xcodeproj" | head -n 1)
-          echo "Available targets & schemes:"
-          xcodebuild -list -project "$PROJECT_FILE"
-          
-          TARGET=$(xcodebuild -list -project "$PROJECT_FILE" | awk '/Targets:/,/^$/' | sed '1d' | grep -vi "Watch" | grep -vi "Tests" | head -n 1 | xargs)
-          echo "Building Project: $PROJECT_FILE | Target: $TARGET"
-          
-          xcodebuild -project "$PROJECT_FILE" \
-            -target "$TARGET" \
+          xcodebuild -project OSWatchCompanion.xcodeproj \
+            -scheme OSWatchCompanion \
             -sdk iphoneos \
             -configuration Release \
             SYMROOT=$(pwd)/build \
@@ -42,9 +28,7 @@ jobs:
       - name: Package into Unsigned IPA
         run: |
           mkdir -p Payload
-          APP_PATH=$(find build -name "*.app" | grep -i "Release-iphoneos" | head -n 1)
-          echo "Found app at: $APP_PATH"
-          cp -r "$APP_PATH" Payload/
+          cp -r build/Release-iphoneos/OSWatchCompanion.app Payload/
           zip -r OSWatchCompanion.ipa Payload
 
       - name: Upload IPA Artifact
