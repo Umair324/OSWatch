@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Screen 3: Incoming Call Full-Screen Alert
 /// Presented automatically whenever `callState == "RINGING"`.
-/// Displays caller name and phone number with animated concentric rings and haptic ring feedback.
+/// Displays caller name, source app ("Phone", "WhatsApp", etc.), and phone number with animated concentric rings.
 struct IncomingCallAlertView: View {
     let callAlert: CallAlert
     let onDismiss: () -> Void
@@ -42,7 +42,7 @@ struct IncomingCallAlertView: View {
                         .symbolEffect(.bounce, value: isPulsing)
                 }
 
-                Text("INCOMING CALL")
+                Text("INCOMING \(callAlert.app.uppercased()) CALL")
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .tracking(1.2)
                     .foregroundStyle(.green)
@@ -67,7 +67,7 @@ struct IncomingCallAlertView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "bell.slash.fill")
                             .font(.system(size: 14, weight: .bold))
-                        Text("Silence Alert")
+                        Text("Silence / Decline")
                             .font(.system(size: 14, weight: .semibold))
                     }
                     .frame(maxWidth: 280)

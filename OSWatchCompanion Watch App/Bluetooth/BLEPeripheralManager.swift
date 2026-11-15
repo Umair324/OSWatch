@@ -118,7 +118,7 @@ enum PlatformDeviceBridge {
 }
 
 /// Manages the watchOS & iOS CoreBluetooth `CBPeripheralManager` lifecycle, GATT service/characteristic registration,
-/// background state restoration, chunked JSON packet reassembly, battery level synchronization, and native haptics.
+/// background state restoration, chunked JSON packet reassembly, CallKit incoming call reporting, battery sync, and native haptics.
 @MainActor
 final class BLEPeripheralManager: NSObject, ObservableObject {
 
@@ -157,10 +157,11 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
     /// Diagnostic status message for packet reassembly and GATT events
     @Published private(set) var lastEventLog: String = "Initializing CoreBluetooth..."
 
-    // MARK: - Private CoreBluetooth Properties
+    // MARK: - Private CoreBluetooth & CallKit Properties
 
     private let logger = Logger(subsystem: "com.oswatch.companion", category: "BLEPeripheralManager")
     private let packetReassembler = BLEPacketReassembler()
+    private let callKitManager = CallKitManager.shared
 
     private var peripheralManager: CBPeripheralManager!
     private var primaryService: CBMutableService?
@@ -182,11 +183,31 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        configureCallKitCallbacks()
         configureWatchBatteryMonitoring()
         initializePeripheralManager()
     }
 
     // MARK: - Setup & Configuration
+
+    private func configureCallKitCallbacks() {
+        callKitManager.onUserCallResponse = { [weak self] response in
+            guard let self = self else { return }
+            self.stopCallRingingHaptics()
+            self.activeCallAlert = nil
+
+            switch response {
+            case .answered:
+                self.lastEventLog = "Call answered via CallKit"
+                self.sendCommand(.answerCall)
+            case .declined:
+                self.lastEventLog = "Call declined via CallKit"
+                self.sendCommand(.declineCall)
+            case .timedOut:
+                self.lastEventLog = "CallKit auto-timeout (35s)"
+            }
+        }
+    }
 
     private func initializePeripheralManager() {
         let options: [String: Any] = [
@@ -330,7 +351,7 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
 
     // MARK: - Outgoing Commands (Watch/iPhone -> Android via 6E400003)
 
-    /// Sends a command (`PLAY_PAUSE`, `NEXT`, `PREV`, `FIND_PHONE`) over characteristic `6E400003`.
+    /// Sends a command (`PLAY_PAUSE`, `NEXT`, `PREV`, `FIND_PHONE`, `ANSWER_CALL`, `DECLINE_CALL`) over `6E400003`.
     func sendCommand(_ command: BLECommand) {
         switch command {
         case .findPhone:
@@ -340,6 +361,10 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
             PlatformDeviceBridge.playHaptic(.click)
         case .next, .prev:
             PlatformDeviceBridge.playHaptic(.directionUp)
+        case .answerCall:
+            PlatformDeviceBridge.playHaptic(.success)
+        case .declineCall:
+            PlatformDeviceBridge.playHaptic(.stop)
         }
 
         lastSentCommand = command
@@ -403,14 +428,15 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
         notifications.removeAll { $0.id == id }
     }
 
-    /// Dismisses or silences the active incoming call overlay
+    /// Dismisses or silences the active incoming call overlay and ends any active CallKit session
     func dismissActiveCallAlert() {
         stopCallRingingHaptics()
         activeCallAlert = nil
-        PlatformDeviceBridge.playHaptic(.stop)
+        callKitManager.endActiveCall()
+        sendCommand(.declineCall)
     }
 
-    // MARK: - Incoming Payload Handling & Haptics
+    // MARK: - Incoming Payload Handling, CallKit & Haptics
 
     private func handleDecodedPayload(_ payload: IncomingBLEPayload) {
         switch payload {
@@ -423,15 +449,26 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
             logger.info("Received Android notification [\(notification.appName)]: \(notification.title)")
 
         case .callAlert(let callAlert):
-            logger.info("Received Android call alert: \(callAlert.callerName) (\(callAlert.callState.rawValue))")
-            lastEventLog = "Call (\(callAlert.callState.rawValue)): \(callAlert.callerName)"
+            logger.info("Received Android call payload: \(callAlert.callerName) via \(callAlert.app) (\(callAlert.callState.rawValue))")
+            lastEventLog = "Call (\(callAlert.app)): \(callAlert.callerName)"
 
             if callAlert.isRinging {
                 activeCallAlert = callAlert
+
+                // Trigger native iOS CallKit incoming call screen & ringtone (even when iPhone is locked)
+                callKitManager.reportIncomingCall(
+                    callerName: callAlert.callerName,
+                    app: callAlert.app,
+                    phoneNumber: callAlert.phoneNumber
+                )
+
                 startCallRingingHaptics()
             } else {
+                // Call ended or removed on Android -> close CallKit screen and stop ringing
                 stopCallRingingHaptics()
                 activeCallAlert = nil
+                callKitManager.endActiveCall()
+                lastEventLog = "Call ended: \(callAlert.callerName)"
             }
         }
     }
@@ -529,10 +566,11 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
         }
     }
 
-    /// Simulates a chunked `RINGING` call alert from Android
+    /// Simulates a chunked Android BLE bridge call payload (`"type": "call"`, `"cat": "call"`, `"isOngoingCall": true`)
+    /// to test native iOS CallKit full-screen UI and ringtone.
     func simulateIncomingCall() {
-        let chunk1 = #"1/2|{"callerName":" Sarah Jenkins ","phoneNumber":"+1 (415) 890-4321","#
-        let chunk2 = #"2/2|"callState":"RINGING"}"#
+        let chunk1 = #"1/2|{"type":"call","cat":"call","isOngoingCall":true,"app":"WhatsApp","#
+        let chunk2 = #"2/2|"title":"Sarah Jenkins","body":"+1 (415) 890-4321"}"#
 
         if let payload = try? packetReassembler.ingest(chunkString: chunk1, from: "simulator") {
             handleDecodedPayload(payload)

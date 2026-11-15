@@ -13,11 +13,11 @@ enum GATTConstants {
     static let rxCharacteristicUUID = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
 
     /// TX Characteristic (Notify):
-    /// Sends media and ping commands (`PLAY_PAUSE`, `NEXT`, `PREV`, `FIND_PHONE`) from Watch to Android
+    /// Sends media, ping, and call response commands from Watch/iPhone to Android
     static let txCharacteristicUUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
 
     /// Battery Characteristic (Read & Write):
-    /// Responds with Watch battery % on Read; receives Android phone battery % on Write
+    /// Responds with Watch/iPhone battery % on Read; receives Android phone battery % on Write
     static let batteryCharacteristicUUID = CBUUID(string: "6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
 
     /// Background CoreBluetooth peripheral restoration identifier
@@ -27,13 +27,15 @@ enum GATTConstants {
     static let advertisedLocalName = "OSWatch-BLE"
 }
 
-// MARK: - Outgoing Watch -> Android Commands
+// MARK: - Outgoing Watch/iPhone -> Android Commands
 
 enum BLECommand: String, CaseIterable, Identifiable {
     case playPause = "PLAY_PAUSE"
     case next = "NEXT"
     case prev = "PREV"
     case findPhone = "FIND_PHONE"
+    case answerCall = "ANSWER_CALL"
+    case declineCall = "DECLINE_CALL"
 
     var id: String { rawValue }
 
@@ -43,6 +45,8 @@ enum BLECommand: String, CaseIterable, Identifiable {
         case .next: return "Next Track"
         case .prev: return "Previous Track"
         case .findPhone: return "Ping Android Phone"
+        case .answerCall: return "Answer Call"
+        case .declineCall: return "Decline Call"
         }
     }
 
@@ -52,6 +56,8 @@ enum BLECommand: String, CaseIterable, Identifiable {
         case .next: return "forward.fill"
         case .prev: return "backward.fill"
         case .findPhone: return "bell.and.waves.left.and.right.fill"
+        case .answerCall: return "phone.fill"
+        case .declineCall: return "phone.down.fill"
         }
     }
 }
@@ -131,8 +137,10 @@ struct AndroidNotification: Identifiable, Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id
         case appName
+        case app
         case title
         case body
+        case text
         case timestamp
     }
 
@@ -162,13 +170,26 @@ struct AndroidNotification: Identifiable, Codable, Equatable {
             self.id = UUID().uuidString
         }
 
-        self.appName = (try? container.decode(String.self, forKey: .appName)) ?? "Android"
+        if let appName = try? container.decode(String.self, forKey: .appName), !appName.isEmpty {
+            self.appName = appName
+        } else if let app = try? container.decode(String.self, forKey: .app), !app.isEmpty {
+            self.appName = app
+        } else {
+            self.appName = "Android"
+        }
+
         self.title = (try? container.decode(String.self, forKey: .title)) ?? "Notification"
-        self.body = (try? container.decode(String.self, forKey: .body)) ?? ""
+
+        if let body = try? container.decode(String.self, forKey: .body), !body.isEmpty {
+            self.body = body
+        } else if let text = try? container.decode(String.self, forKey: .text), !text.isEmpty {
+            self.body = text
+        } else {
+            self.body = ""
+        }
 
         // Support epoch milliseconds, epoch seconds, or ISO-8601 string
         if let rawDouble = try? container.decode(Double.self, forKey: .timestamp) {
-            // Heuristic: values > 10_000_000_000 are epoch milliseconds (standard on Android System.currentTimeMillis())
             let seconds = rawDouble > 10_000_000_000 ? (rawDouble / 1000.0) : rawDouble
             self.timestamp = Date(timeIntervalSince1970: seconds)
         } else if let rawString = try? container.decode(String.self, forKey: .timestamp) {
@@ -183,6 +204,15 @@ struct AndroidNotification: Identifiable, Codable, Equatable {
         } else {
             self.timestamp = Date()
         }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(appName, forKey: .appName)
+        try container.encode(title, forKey: .title)
+        try container.encode(body, forKey: .body)
+        try container.encode(timestamp.timeIntervalSince1970 * 1000.0, forKey: .timestamp)
     }
 
     /// Dynamic color badge determined by the Android application's name
@@ -235,13 +265,13 @@ enum CallState: String, Codable, Equatable {
 
     init(rawString: String) {
         switch rawString.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
-        case "RINGING", "INCOMING":
+        case "RINGING", "INCOMING", "CALL", "ACTIVE_RINGING", "START":
             self = .ringing
         case "OFFHOOK", "ACTIVE", "ANSWERED":
             self = .offhook
         case "IDLE", "DISCONNECTED":
             self = .idle
-        case "ENDED", "MISSED", "REJECTED":
+        case "ENDED", "MISSED", "REJECTED", "REMOVED", "DISMISSED", "STOP", "END":
             self = .ended
         default:
             self = .unknown
@@ -250,44 +280,116 @@ enum CallState: String, Codable, Equatable {
 }
 
 struct CallAlert: Identifiable, Codable, Equatable {
-    var id: String { "\(phoneNumber)-\(callState.rawValue)" }
+    var id: String { "\(callerName)-\(app)-\(callState.rawValue)" }
     let callerName: String
     let phoneNumber: String
+    let app: String
     let callState: CallState
     let receivedAt: Date
 
     enum CodingKeys: String, CodingKey {
         case callerName
+        case title
         case phoneNumber
+        case body
+        case text
+        case app
+        case appName
         case callState
+        case status
+        case action
+        case type
+        case cat
+        case isOngoingCall
+        case removed
+        case isRemoved
     }
 
     init(
         callerName: String,
         phoneNumber: String,
+        app: String = "Phone",
         callState: CallState,
         receivedAt: Date = Date()
     ) {
         self.callerName = callerName
         self.phoneNumber = phoneNumber
+        self.app = app
         self.callState = callState
         self.receivedAt = receivedAt
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let rawName = (try? container.decode(String.self, forKey: .callerName)) ?? ""
-        let rawNumber = (try? container.decode(String.self, forKey: .phoneNumber)) ?? ""
-        let rawState = try container.decode(String.self, forKey: .callState)
 
-        self.callerName = rawName.isEmpty ? "Unknown Caller" : rawName
-        self.phoneNumber = rawNumber.isEmpty ? "Private Number" : rawNumber
-        self.callState = CallState(rawString: rawState)
+        // 1. Extract caller name from `title` or `callerName`
+        let rawTitle = (try? container.decode(String.self, forKey: .title))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawCaller = (try? container.decode(String.self, forKey: .callerName))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let resolvedCaller = !rawTitle.isEmpty ? rawTitle : rawCaller
+        self.callerName = resolvedCaller.isEmpty ? "Unknown Caller" : resolvedCaller
+
+        // 2. Extract source app (e.g. "Phone", "WhatsApp") from `app` or `appName`
+        let rawApp = (try? container.decode(String.self, forKey: .app))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawAppName = (try? container.decode(String.self, forKey: .appName))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let resolvedApp = !rawApp.isEmpty ? rawApp : rawAppName
+        self.app = resolvedApp.isEmpty ? "Phone" : resolvedApp
+
+        // 3. Extract phone number or subtitle from `phoneNumber`, `body`, `text`, or fallback to `app`
+        let rawPhone = (try? container.decode(String.self, forKey: .phoneNumber))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawBody = (try? container.decode(String.self, forKey: .body))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawText = (try? container.decode(String.self, forKey: .text))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if !rawPhone.isEmpty {
+            self.phoneNumber = rawPhone
+        } else if !rawBody.isEmpty {
+            self.phoneNumber = rawBody
+        } else if !rawText.isEmpty {
+            self.phoneNumber = rawText
+        } else {
+            self.phoneNumber = "\(self.app) Audio"
+        }
+
+        // 4. Determine CallState (`RINGING` vs `ENDED` / `IDLE`)
+        let isRemovedFlag = (try? container.decode(Bool.self, forKey: .removed)) ??
+                            (try? container.decode(Bool.self, forKey: .isRemoved)) ?? false
+        let ongoingFlag = try? container.decode(Bool.self, forKey: .isOngoingCall)
+        let rawType = ((try? container.decode(String.self, forKey: .type)) ?? "").lowercased()
+        let rawAction = ((try? container.decode(String.self, forKey: .action)) ?? "").lowercased()
+
+        if isRemovedFlag || ongoingFlag == false ||
+           rawType.contains("end") || rawType.contains("remove") || rawType.contains("dismiss") ||
+           rawAction.contains("end") || rawAction.contains("remove") || rawAction.contains("dismiss") {
+            self.callState = .ended
+        } else if let rawState = try? container.decode(String.self, forKey: .callState), !rawState.isEmpty {
+            self.callState = CallState(rawString: rawState)
+        } else if let rawStatus = try? container.decode(String.self, forKey: .status), !rawStatus.isEmpty {
+            self.callState = CallState(rawString: rawStatus)
+        } else {
+            // When `type == "call"`, `cat == "call"`, or `isOngoingCall == true` with no explicit end state, treat as RINGING
+            self.callState = .ringing
+        }
+
         self.receivedAt = Date()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(callerName, forKey: .callerName)
+        try container.encode(phoneNumber, forKey: .phoneNumber)
+        try container.encode(app, forKey: .app)
+        try container.encode(callState.rawValue, forKey: .callState)
     }
 
     var isRinging: Bool {
         callState == .ringing
+    }
+
+    /// Formatted caller display name for CallKit (e.g., "Sarah Jenkins (WhatsApp)")
+    var callKitDisplayName: String {
+        if app.isEmpty || app.caseInsensitiveCompare("Phone") == .orderedSame {
+            return callerName
+        }
+        return "\(callerName) (\(app))"
     }
 }
 
@@ -303,13 +405,29 @@ enum IncomingBLEPayload: Equatable {
             throw BLEPayloadError.invalidUTF8
         }
 
-        // Inspect keys to distinguish `{ callerName, phoneNumber, callState }` from `{ id, appName, title, body, timestamp }`
         if let rawObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if rawObject["callState"] != nil || rawObject["callerName"] != nil || rawObject["phoneNumber"] != nil {
+            let rawType = (rawObject["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let rawCat = (rawObject["cat"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ??
+                         (rawObject["category"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let isOngoingCall = (rawObject["isOngoingCall"] as? Bool) ?? false
+
+            let isCallPayload =
+                rawType == "call" ||
+                rawType == "call_end" ||
+                rawType == "call_removed" ||
+                rawCat == "call" ||
+                isOngoingCall ||
+                rawObject["callState"] != nil ||
+                rawObject["callerName"] != nil ||
+                rawObject["phoneNumber"] != nil
+
+            if isCallPayload {
                 let alert = try JSONDecoder().decode(CallAlert.self, from: data)
                 return .callAlert(alert)
             }
-            if rawObject["appName"] != nil || rawObject["title"] != nil || rawObject["body"] != nil {
+
+            if rawObject["appName"] != nil || rawObject["app"] != nil ||
+               rawObject["title"] != nil || rawObject["body"] != nil || rawObject["text"] != nil {
                 let notification = try JSONDecoder().decode(AndroidNotification.self, from: data)
                 return .notification(notification)
             }

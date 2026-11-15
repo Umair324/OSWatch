@@ -17,6 +17,7 @@
 		A10000082A00000100000001 /* IncomingCallAlertView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000082A00000100000001 /* IncomingCallAlertView.swift */; };
 		A10000092A00000100000001 /* RemoteControlsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000092A00000100000001 /* RemoteControlsView.swift */; };
 		A100000A2A00000100000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A200000A2A00000100000001 /* Assets.xcassets */; };
+		A100000C2A00000100000001 /* CallKitManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000C2A00000100000001 /* CallKitManager.swift */; };
 		B10000012A00000100000001 /* OSWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000012A00000100000001 /* OSWatchApp.swift */; };
 		B10000022A00000100000001 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000022A00000100000001 /* Models.swift */; };
 		B10000032A00000100000001 /* BLEPacketReassembler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000032A00000100000001 /* BLEPacketReassembler.swift */; };
@@ -27,6 +28,7 @@
 		B10000082A00000100000001 /* IncomingCallAlertView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000082A00000100000001 /* IncomingCallAlertView.swift */; };
 		B10000092A00000100000001 /* RemoteControlsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000092A00000100000001 /* RemoteControlsView.swift */; };
 		B100000A2A00000100000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A200000A2A00000100000001 /* Assets.xcassets */; };
+		B100000C2A00000100000001 /* CallKitManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000C2A00000100000001 /* CallKitManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -43,6 +45,7 @@
 		A20000092A00000100000001 /* RemoteControlsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlsView.swift; sourceTree = "<group>"; };
 		A200000A2A00000100000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A200000B2A00000100000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A200000C2A00000100000001 /* CallKitManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallKitManager.swift; sourceTree = "<group>"; };
 		B200000B2A00000100000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -107,6 +110,7 @@
 			children = (
 				A20000032A00000100000001 /* BLEPacketReassembler.swift */,
 				A20000042A00000100000001 /* BLEPeripheralManager.swift */,
+				A200000C2A00000100000001 /* CallKitManager.swift */,
 			);
 			path = Bluetooth;
 			sourceTree = "<group>";
@@ -234,6 +238,7 @@
 				A10000022A00000100000001 /* Models.swift in Sources */,
 				A10000032A00000100000001 /* BLEPacketReassembler.swift in Sources */,
 				A10000042A00000100000001 /* BLEPeripheralManager.swift in Sources */,
+				A100000C2A00000100000001 /* CallKitManager.swift in Sources */,
 				A10000052A00000100000001 /* ContentView.swift in Sources */,
 				A10000062A00000100000001 /* StatusPairingView.swift in Sources */,
 				A10000072A00000100000001 /* NotificationsFeedView.swift in Sources */,
@@ -250,6 +255,7 @@
 				B10000022A00000100000001 /* Models.swift in Sources */,
 				B10000032A00000100000001 /* BLEPacketReassembler.swift in Sources */,
 				B10000042A00000100000001 /* BLEPeripheralManager.swift in Sources */,
+				B100000C2A00000100000001 /* CallKitManager.swift in Sources */,
 				B10000052A00000100000001 /* ContentView.swift in Sources */,
 				B10000062A00000100000001 /* StatusPairingView.swift in Sources */,
 				B10000072A00000100000001 /* NotificationsFeedView.swift in Sources */,
