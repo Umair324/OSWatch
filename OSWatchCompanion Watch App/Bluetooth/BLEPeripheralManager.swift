@@ -189,6 +189,9 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
     /// Outgoing command queue if `updateValue(_:for:onSubscribedCentrals:)` returns `false` (TX buffer full)
     private var pendingOutgoingPayloads: [Data] = []
 
+    /// Cached value for GATT `.read` requests on `6E400003-B5A3-F393-E0A9-E50E24DCCA9E`
+    private var latestCallControlReadValue: Data = Data(#"{"type":"call_action","action":"none"}"#.utf8)
+
     /// Repeating timers for battery polling and incoming call ringing haptics
     private var batteryMonitorTimer: Timer?
     private var callHapticTimer: Timer?
@@ -209,6 +212,11 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
             self?.latestCallKitStatus = status
         }
 
+        // Notify subscribed centrals on 6E400003-B5A3-F393-E0A9-E50E24DCCA9E with JSON call_action
+        callKitManager.onNotifyCallControlJSON = { [weak self] jsonString in
+            self?.notifyCallControlJSON(jsonString)
+        }
+
         callKitManager.onUserCallResponse = { [weak self] response in
             guard let self = self else { return }
             self.stopCallRingingHaptics()
@@ -216,11 +224,11 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
 
             switch response {
             case .answered:
+                PlatformDeviceBridge.playHaptic(.success)
                 self.lastEventLog = "Call answered via CallKit"
-                self.sendCommand(.answerCall)
             case .declined:
+                PlatformDeviceBridge.playHaptic(.stop)
                 self.lastEventLog = "Call declined via CallKit"
-                self.sendCommand(.declineCall)
             case .timedOut:
                 self.lastEventLog = "CallKit auto-timeout (35s)"
             }
@@ -268,10 +276,11 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
             permissions: [.writeable]
         )
 
-        // 2. TX Characteristic (6E400003): Notify for commands from Watch/iPhone -> Android
+        // 2. Call Control & TX Characteristic (6E400003): Notify & Read for bi-directional call control JSON
+        //    ({"type":"call_action","action":"answer"} / {"type":"call_action","action":"decline"}) and commands
         let txChar = CBMutableCharacteristic(
             type: GATTConstants.txCharacteristicUUID,
-            properties: [.notify],
+            properties: [.notify, .read],
             value: nil,
             permissions: [.readable]
         )
@@ -366,7 +375,40 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Outgoing Commands (Watch/iPhone -> Android via 6E400003)
+    // MARK: - Outgoing Call Control JSON & Commands (`6E400003-B5A3-F393-E0A9-E50E24DCCA9E`)
+
+    /// Notifies subscribed centrals on `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` with a JSON string
+    /// (such as `{"type":"call_action","action":"answer"}` or `{"type":"call_action","action":"decline"}`),
+    /// and caches the payload for `.read` requests on `6E400003`.
+    func notifyCallControlJSON(_ jsonString: String) {
+        let payloadData = Data(jsonString.utf8)
+        latestCallControlReadValue = payloadData
+
+        guard
+            peripheralManager.state == .poweredOn,
+            let txCharacteristic = txCharacteristic
+        else {
+            pendingOutgoingPayloads.append(payloadData)
+            lastEventLog = "Queued \(jsonString) (BLE not ready)"
+            logger.warning("Queued call control JSON '\(jsonString)': peripheral not ready")
+            return
+        }
+
+        let sentImmediately = peripheralManager.updateValue(
+            payloadData,
+            for: txCharacteristic,
+            onSubscribedCentrals: nil
+        )
+
+        if sentImmediately {
+            lastEventLog = "Notified 6E400003: \(jsonString)"
+            logger.info("Notified 6E400003 with call control JSON: \(jsonString)")
+        } else {
+            pendingOutgoingPayloads.append(payloadData)
+            lastEventLog = "Buffered 6E400003: \(jsonString)"
+            logger.debug("TX queue full; buffered call control JSON: \(jsonString)")
+        }
+    }
 
     /// Sends a command (`PLAY_PAUSE`, `NEXT`, `PREV`, `FIND_PHONE`, `ANSWER_CALL`, `DECLINE_CALL`) over `6E400003`.
     func sendCommand(_ command: BLECommand) {
@@ -380,14 +422,19 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
             PlatformDeviceBridge.playHaptic(.directionUp)
         case .answerCall:
             PlatformDeviceBridge.playHaptic(.success)
+            notifyCallControlJSON(GATTConstants.callActionAnswerJSON)
+            return
         case .declineCall:
             PlatformDeviceBridge.playHaptic(.stop)
+            notifyCallControlJSON(GATTConstants.callActionDeclineJSON)
+            return
         }
 
         lastSentCommand = command
         lastCommandTimestamp = Date()
 
         guard let payloadData = command.rawValue.data(using: .utf8) else { return }
+        latestCallControlReadValue = payloadData
 
         guard
             peripheralManager.state == .poweredOn,
@@ -445,12 +492,12 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
         notifications.removeAll { $0.id == id }
     }
 
-    /// Dismisses or silences the active incoming call overlay and ends any active CallKit session
+    /// Dismisses or silences the active incoming call overlay, ends CallKit, and sends `{"type":"call_action","action":"decline"}`
     func dismissActiveCallAlert() {
         stopCallRingingHaptics()
         activeCallAlert = nil
         callKitManager.endActiveCall()
-        sendCommand(.declineCall)
+        notifyCallControlJSON(GATTConstants.callActionDeclineJSON)
     }
 
     // MARK: - Unified CallKit Trigger & Incoming Payload Handler
@@ -761,26 +808,36 @@ extension BLEPeripheralManager: CBPeripheralManagerDelegate {
         }
     }
 
-    /// Handles GATT Read requests on `6E400004` (Watch / iPhone battery percentage)
+    /// Handles GATT Read requests on `6E400003` (Call Control JSON) and `6E400004` (Watch / iPhone battery percentage)
     nonisolated func peripheralManager(
         _ peripheral: CBPeripheralManager,
         didReceiveRead request: CBATTRequest
     ) {
         Task { @MainActor in
-            guard request.characteristic.uuid == GATTConstants.batteryCharacteristicUUID else {
+            switch request.characteristic.uuid {
+            case GATTConstants.txCharacteristicUUID:
+                let responseData = latestCallControlReadValue
+                if request.offset > responseData.count {
+                    peripheral.respond(to: request, withResult: .invalidOffset)
+                    return
+                }
+                request.value = responseData.subdata(in: request.offset..<responseData.count)
+                peripheral.respond(to: request, withResult: .success)
+                lastEventLog = "Served 6E400003 Read"
+
+            case GATTConstants.batteryCharacteristicUUID:
+                let batteryData = encodedWatchBatteryData()
+                if request.offset > batteryData.count {
+                    peripheral.respond(to: request, withResult: .invalidOffset)
+                    return
+                }
+                request.value = batteryData.subdata(in: request.offset..<batteryData.count)
+                peripheral.respond(to: request, withResult: .success)
+                lastEventLog = "Served battery (\(watchBatteryPercent)%)"
+
+            default:
                 peripheral.respond(to: request, withResult: .requestNotSupported)
-                return
             }
-
-            let batteryData = encodedWatchBatteryData()
-            if request.offset > batteryData.count {
-                peripheral.respond(to: request, withResult: .invalidOffset)
-                return
-            }
-
-            request.value = batteryData.subdata(in: request.offset..<batteryData.count)
-            peripheral.respond(to: request, withResult: .success)
-            lastEventLog = "Served battery (\(watchBatteryPercent)%)"
         }
     }
 

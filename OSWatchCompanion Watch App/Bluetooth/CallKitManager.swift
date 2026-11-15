@@ -6,7 +6,8 @@ import CallKit
 import AVFoundation
 
 /// Dedicated CallKit manager using `CXProvider` and `CXCallController` to trigger
-/// the native iOS full-screen Incoming Call UI and iPhone ringtone when an Android call payload arrives over BLE.
+/// the native iOS full-screen Incoming Call UI and iPhone ringtone when an Android call payload arrives over BLE,
+/// and notify subscribed centrals on `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` when the user taps Accept or Decline.
 @MainActor
 final class CallKitManager: NSObject {
 
@@ -36,6 +37,9 @@ final class CallKitManager: NSObject {
     /// Callback invoked when the user taps Answer or Decline on the native iOS CallKit screen (or when it times out)
     var onUserCallResponse: ((UserCallResponse) -> Void)?
 
+    /// Callback that notifies subscribed BLE centrals on `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` with a JSON payload
+    var onNotifyCallControlJSON: ((String) -> Void)?
+
     /// Callback invoked with human-readable CallKit status for the on-screen debug banner
     var onCallKitStatusUpdate: ((String) -> Void)?
 
@@ -58,10 +62,6 @@ final class CallKitManager: NSObject {
 
     /// Reports a new incoming call to iOS CallKit so the native full-screen Incoming Call UI and ringtone trigger,
     /// even when the iPhone screen is locked.
-    /// - Parameters:
-    ///   - callerName: Extracted `title` / `callerName` from the Android BLE JSON payload
-    ///   - app: Extracted `app` / `appName` (e.g. `"Phone"` or `"WhatsApp"`)
-    ///   - phoneNumber: Optional phone number or subtitle
     func reportIncomingCall(callerName: String, app: String, phoneNumber: String = "") {
         let cleanCaller = callerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Unknown Caller" : callerName
         let cleanApp = app.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Phone" : app
@@ -152,14 +152,6 @@ final class CallKitManager: NSObject {
         for callUUID in activeUUIDs {
             logger.info("Ending CallKit session \(callUUID.uuidString) with reason \(String(describing: reason.rawValue))")
             provider.reportCall(with: callUUID, endedAt: Date(), reason: reason)
-
-            let endAction = CXEndCallAction(call: callUUID)
-            let transaction = CXTransaction(action: endAction)
-            callController.request(transaction) { [weak self] error in
-                if let error = error {
-                    self?.logger.debug("CXEndCallAction completed after reportCall: \(error.localizedDescription)")
-                }
-            }
         }
         onCallKitStatusUpdate?("CallKit Session Ended")
     }
@@ -194,16 +186,20 @@ extension CallKitManager: CXProviderDelegate {
         }
     }
 
-    /// Triggered when the user taps "Answer" on the native iOS CallKit screen
+    /// Triggered when the user taps "Accept" / "Answer" on the native iOS CallKit screen
     nonisolated func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         Task { @MainActor in
             let callUUID = action.callUUID
-            logger.info("User tapped Answer on CallKit screen for \(callUUID.uuidString)")
+            logger.info("User tapped Accept (CXAnswerCallAction) on CallKit screen for \(callUUID.uuidString)")
 
             cancelAutoTimeout()
             action.fulfill()
 
-            onCallKitStatusUpdate?("Call Answered on iPhone")
+            // Notify subscribed centrals on 6E400003-B5A3-F393-E0A9-E50E24DCCA9E with {"type":"call_action","action":"answer"}
+            let answerJSON = #"{"type":"call_action","action":"answer"}"#
+            onNotifyCallControlJSON?(answerJSON)
+
+            onCallKitStatusUpdate?("Sent BLE: \(answerJSON)")
             onUserCallResponse?(.answered)
 
             activeCallUUID = nil
@@ -215,7 +211,7 @@ extension CallKitManager: CXProviderDelegate {
     nonisolated func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         Task { @MainActor in
             let callUUID = action.callUUID
-            logger.info("User tapped Decline/End on CallKit screen for \(callUUID.uuidString)")
+            logger.info("User tapped Decline/End (CXEndCallAction) on CallKit screen for \(callUUID.uuidString)")
 
             cancelAutoTimeout()
             action.fulfill()
@@ -224,8 +220,12 @@ extension CallKitManager: CXProviderDelegate {
                 activeCallUUID = nil
             }
 
+            // Notify subscribed centrals on 6E400003-B5A3-F393-E0A9-E50E24DCCA9E with {"type":"call_action","action":"decline"}
+            let declineJSON = #"{"type":"call_action","action":"decline"}"#
+            onNotifyCallControlJSON?(declineJSON)
+
             provider.reportCall(with: callUUID, endedAt: Date(), reason: .declinedElsewhere)
-            onCallKitStatusUpdate?("Call Declined on iPhone")
+            onCallKitStatusUpdate?("Sent BLE: \(declineJSON)")
             onUserCallResponse?(.declined)
         }
     }
@@ -244,6 +244,7 @@ final class CallKitManager {
 
     static let shared = CallKitManager()
     var onUserCallResponse: ((UserCallResponse) -> Void)?
+    var onNotifyCallControlJSON: ((String) -> Void)?
     var onCallKitStatusUpdate: ((String) -> Void)?
 
     func reportIncomingCall(callerName: String, app: String, phoneNumber: String = "") {}

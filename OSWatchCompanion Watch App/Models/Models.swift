@@ -12,9 +12,14 @@ enum GATTConstants {
     /// Receives chunked JSON strings (`1/3|...`) for notifications and call alerts from Android
     static let rxCharacteristicUUID = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
 
-    /// TX Characteristic (Notify):
-    /// Sends media, ping, and call response commands from Watch/iPhone to Android
+    /// TX / Call Control Characteristic (Notify & Read):
+    /// Sends call control JSON (`{"type":"call_action","action":"answer"}` / `{"type":"call_action","action":"decline"}`)
+    /// and media/ping commands from Watch/iPhone to Android
     static let txCharacteristicUUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+
+    /// Call action JSON payloads sent over `6E400003-B5A3-F393-E0A9-E50E24DCCA9E`
+    static let callActionAnswerJSON = #"{"type":"call_action","action":"answer"}"#
+    static let callActionDeclineJSON = #"{"type":"call_action","action":"decline"}"#
 
     /// Battery Characteristic (Read & Write):
     /// Responds with Watch/iPhone battery % on Read; receives Android phone battery % on Write
