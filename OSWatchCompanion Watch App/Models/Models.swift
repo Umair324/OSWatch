@@ -25,6 +25,18 @@ enum GATTConstants {
 
     /// Local advertised peripheral name discovered by the Android host app
     static let advertisedLocalName = "OSWatch-BLE"
+
+    /// Keywords that identify an incoming call payload even if `type`/`cat` is generic
+    static let callDetectionKeywords: [String] = [
+        "incoming call",
+        "voice call",
+        "video call",
+        "ringing",
+        "is calling",
+        "calling you",
+        "audio call",
+        "ongoing call"
+    ]
 }
 
 // MARK: - Outgoing Watch/iPhone -> Android Commands
@@ -138,10 +150,16 @@ struct AndroidNotification: Identifiable, Codable, Equatable {
         case id
         case appName
         case app
+        case packageName
+        case pkg
         case title
+        case sender
         case body
         case text
+        case message
+        case subText
         case timestamp
+        case time
     }
 
     init(
@@ -170,29 +188,41 @@ struct AndroidNotification: Identifiable, Codable, Equatable {
             self.id = UUID().uuidString
         }
 
-        if let appName = try? container.decode(String.self, forKey: .appName), !appName.isEmpty {
-            self.appName = appName
-        } else if let app = try? container.decode(String.self, forKey: .app), !app.isEmpty {
-            self.appName = app
-        } else {
-            self.appName = "Android"
-        }
+        // Support `appName`, `app`, `packageName`, or `pkg`
+        let candidatesApp = [
+            try? container.decode(String.self, forKey: .appName),
+            try? container.decode(String.self, forKey: .app),
+            try? container.decode(String.self, forKey: .packageName),
+            try? container.decode(String.self, forKey: .pkg)
+        ]
+        self.appName = candidatesApp.compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? "Android"
 
-        self.title = (try? container.decode(String.self, forKey: .title)) ?? "Notification"
+        // Support `title` or `sender`
+        let candidatesTitle = [
+            try? container.decode(String.self, forKey: .title),
+            try? container.decode(String.self, forKey: .sender)
+        ]
+        self.title = candidatesTitle.compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? "Notification"
 
-        if let body = try? container.decode(String.self, forKey: .body), !body.isEmpty {
-            self.body = body
-        } else if let text = try? container.decode(String.self, forKey: .text), !text.isEmpty {
-            self.body = text
-        } else {
-            self.body = ""
-        }
+        // Support `body`, `text`, `message`, or `subText`
+        let candidatesBody = [
+            try? container.decode(String.self, forKey: .body),
+            try? container.decode(String.self, forKey: .text),
+            try? container.decode(String.self, forKey: .message),
+            try? container.decode(String.self, forKey: .subText)
+        ]
+        self.body = candidatesBody.compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? ""
 
-        // Support epoch milliseconds, epoch seconds, or ISO-8601 string
-        if let rawDouble = try? container.decode(Double.self, forKey: .timestamp) {
+        // Support epoch milliseconds, epoch seconds, or ISO-8601 string in `timestamp` or `time`
+        if let rawDouble = (try? container.decode(Double.self, forKey: .timestamp)) ??
+                           (try? container.decode(Double.self, forKey: .time)) {
             let seconds = rawDouble > 10_000_000_000 ? (rawDouble / 1000.0) : rawDouble
             self.timestamp = Date(timeIntervalSince1970: seconds)
-        } else if let rawString = try? container.decode(String.self, forKey: .timestamp) {
+        } else if let rawString = (try? container.decode(String.self, forKey: .timestamp)) ??
+                                  (try? container.decode(String.self, forKey: .time)) {
             if let numericValue = Double(rawString) {
                 let seconds = numericValue > 10_000_000_000 ? (numericValue / 1000.0) : numericValue
                 self.timestamp = Date(timeIntervalSince1970: seconds)
@@ -265,7 +295,7 @@ enum CallState: String, Codable, Equatable {
 
     init(rawString: String) {
         switch rawString.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
-        case "RINGING", "INCOMING", "CALL", "ACTIVE_RINGING", "START":
+        case "RINGING", "INCOMING", "CALL", "ACTIVE_RINGING", "START", "ONGOING":
             self = .ringing
         case "OFFHOOK", "ACTIVE", "ANSWERED":
             self = .offhook
@@ -290,17 +320,27 @@ struct CallAlert: Identifiable, Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case callerName
         case title
+        case sender
+        case name
         case phoneNumber
+        case number
         case body
         case text
+        case message
+        case subText
         case app
         case appName
+        case packageName
+        case pkg
         case callState
         case status
+        case state
         case action
         case type
         case cat
+        case category
         case isOngoingCall
+        case ongoing
         case removed
         case isRemoved
     }
@@ -309,7 +349,7 @@ struct CallAlert: Identifiable, Codable, Equatable {
         callerName: String,
         phoneNumber: String,
         app: String = "Phone",
-        callState: CallState,
+        callState: CallState = .ringing,
         receivedAt: Date = Date()
     ) {
         self.callerName = callerName
@@ -322,54 +362,92 @@ struct CallAlert: Identifiable, Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
-        // 1. Extract caller name from `title` or `callerName`
-        let rawTitle = (try? container.decode(String.self, forKey: .title))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let rawCaller = (try? container.decode(String.self, forKey: .callerName))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let resolvedCaller = !rawTitle.isEmpty ? rawTitle : rawCaller
-        self.callerName = resolvedCaller.isEmpty ? "Unknown Caller" : resolvedCaller
+        // 1. Extract caller name from `title`, `callerName`, `sender`, or `name`
+        let callerCandidates = [
+            try? container.decode(String.self, forKey: .title),
+            try? container.decode(String.self, forKey: .callerName),
+            try? container.decode(String.self, forKey: .sender),
+            try? container.decode(String.self, forKey: .name)
+        ]
+        self.callerName = callerCandidates
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? "Unknown Caller"
 
-        // 2. Extract source app (e.g. "Phone", "WhatsApp") from `app` or `appName`
-        let rawApp = (try? container.decode(String.self, forKey: .app))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let rawAppName = (try? container.decode(String.self, forKey: .appName))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let resolvedApp = !rawApp.isEmpty ? rawApp : rawAppName
-        self.app = resolvedApp.isEmpty ? "Phone" : resolvedApp
+        // 2. Extract source app (e.g. "Phone", "WhatsApp") from `app`, `appName`, `packageName`, or `pkg`
+        let appCandidates = [
+            try? container.decode(String.self, forKey: .app),
+            try? container.decode(String.self, forKey: .appName),
+            try? container.decode(String.self, forKey: .packageName),
+            try? container.decode(String.self, forKey: .pkg)
+        ]
+        self.app = appCandidates
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? "Phone"
 
-        // 3. Extract phone number or subtitle from `phoneNumber`, `body`, `text`, or fallback to `app`
-        let rawPhone = (try? container.decode(String.self, forKey: .phoneNumber))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let rawBody = (try? container.decode(String.self, forKey: .body))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let rawText = (try? container.decode(String.self, forKey: .text))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        if !rawPhone.isEmpty {
-            self.phoneNumber = rawPhone
-        } else if !rawBody.isEmpty {
-            self.phoneNumber = rawBody
-        } else if !rawText.isEmpty {
-            self.phoneNumber = rawText
-        } else {
-            self.phoneNumber = "\(self.app) Audio"
-        }
+        // 3. Extract phone number or call description from `phoneNumber`, `number`, `body`, `text`, `message`, or `subText`
+        let phoneCandidates = [
+            try? container.decode(String.self, forKey: .phoneNumber),
+            try? container.decode(String.self, forKey: .number),
+            try? container.decode(String.self, forKey: .body),
+            try? container.decode(String.self, forKey: .text),
+            try? container.decode(String.self, forKey: .message),
+            try? container.decode(String.self, forKey: .subText)
+        ]
+        self.phoneNumber = phoneCandidates
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? "Incoming \(self.app) Call"
 
         // 4. Determine CallState (`RINGING` vs `ENDED` / `IDLE`)
-        let isRemovedFlag = (try? container.decode(Bool.self, forKey: .removed)) ??
-                            (try? container.decode(Bool.self, forKey: .isRemoved)) ?? false
-        let ongoingFlag = try? container.decode(Bool.self, forKey: .isOngoingCall)
+        let isRemovedFlag = Self.decodeFlexibleBool(from: container, forKey: .removed) ??
+                            Self.decodeFlexibleBool(from: container, forKey: .isRemoved) ?? false
+        let ongoingFlag = Self.decodeFlexibleBool(from: container, forKey: .isOngoingCall) ??
+                          Self.decodeFlexibleBool(from: container, forKey: .ongoing)
+
         let rawType = ((try? container.decode(String.self, forKey: .type)) ?? "").lowercased()
         let rawAction = ((try? container.decode(String.self, forKey: .action)) ?? "").lowercased()
+        let rawCat = ((try? container.decode(String.self, forKey: .cat)) ??
+                      (try? container.decode(String.self, forKey: .category)) ?? "").lowercased()
 
-        if isRemovedFlag || ongoingFlag == false ||
+        if isRemovedFlag ||
            rawType.contains("end") || rawType.contains("remove") || rawType.contains("dismiss") ||
            rawAction.contains("end") || rawAction.contains("remove") || rawAction.contains("dismiss") {
             self.callState = .ended
-        } else if let rawState = try? container.decode(String.self, forKey: .callState), !rawState.isEmpty {
-            self.callState = CallState(rawString: rawState)
-        } else if let rawStatus = try? container.decode(String.self, forKey: .status), !rawStatus.isEmpty {
-            self.callState = CallState(rawString: rawStatus)
+        } else if let rawState = (try? container.decode(String.self, forKey: .callState)) ??
+                                 (try? container.decode(String.self, forKey: .status)) ??
+                                 (try? container.decode(String.self, forKey: .state)),
+                  !rawState.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let parsed = CallState(rawString: rawState)
+            // If `type == "call"` or `cat == "call"` or `isOngoingCall == true` and state was unknown, treat as ringing
+            if parsed == .unknown && (rawType == "call" || rawCat == "call" || ongoingFlag == true) {
+                self.callState = .ringing
+            } else {
+                self.callState = parsed
+            }
+        } else if ongoingFlag == false && rawType != "call" && rawCat != "call" {
+            // Only mark ended if explicitly `isOngoingCall: false` AND not a fresh call notification
+            self.callState = .ended
         } else {
-            // When `type == "call"`, `cat == "call"`, or `isOngoingCall == true` with no explicit end state, treat as RINGING
             self.callState = .ringing
         }
 
         self.receivedAt = Date()
+    }
+
+    private static func decodeFlexibleBool(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) -> Bool? {
+        if let boolVal = try? container.decode(Bool.self, forKey: key) {
+            return boolVal
+        }
+        if let intVal = try? container.decode(Int.self, forKey: key) {
+            return intVal != 0
+        }
+        if let strVal = (try? container.decode(String.self, forKey: key))?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            if strVal == "true" || strVal == "1" || strVal == "yes" { return true }
+            if strVal == "false" || strVal == "0" || strVal == "no" { return false }
+        }
+        return nil
     }
 
     func encode(to encoder: Encoder) throws {
@@ -399,6 +477,13 @@ enum IncomingBLEPayload: Equatable {
     case notification(AndroidNotification)
     case callAlert(CallAlert)
 
+    /// Returns true if any text in the payload contains one of the call keywords
+    /// (`incoming call`, `voice call`, `video call`, `ringing`, `is calling`, etc.)
+    static func containsCallKeyword(in text: String) -> Bool {
+        let lower = text.lowercased()
+        return GATTConstants.callDetectionKeywords.contains { lower.contains($0) }
+    }
+
     /// Inspects a reconstructed JSON payload and decodes it as either a `CallAlert` or `AndroidNotification`
     static func decode(from jsonString: String) throws -> IncomingBLEPayload {
         guard let data = jsonString.data(using: .utf8) else {
@@ -406,34 +491,109 @@ enum IncomingBLEPayload: Equatable {
         }
 
         if let rawObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let rawType = (rawObject["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-            let rawCat = (rawObject["cat"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ??
-                         (rawObject["category"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-            let isOngoingCall = (rawObject["isOngoingCall"] as? Bool) ?? false
+            let rawType = String(describing: rawObject["type"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let rawCat = String(describing: rawObject["cat"] ?? rawObject["category"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+            let isOngoingCall: Bool = {
+                if let b = rawObject["isOngoingCall"] as? Bool { return b }
+                if let b = rawObject["ongoing"] as? Bool { return b }
+                if let n = rawObject["isOngoingCall"] as? NSNumber { return n.boolValue }
+                if let s = (rawObject["isOngoingCall"] as? String)?.lowercased() {
+                    return s == "true" || s == "1"
+                }
+                return false
+            }()
+
+            // Collect all text fields to check for call keywords (`incoming call`, `voice call`, `video call`, `ringing`, `is calling`)
+            let combinedTextFields = [
+                rawObject["title"] as? String,
+                rawObject["callerName"] as? String,
+                rawObject["body"] as? String,
+                rawObject["text"] as? String,
+                rawObject["message"] as? String,
+                rawObject["subText"] as? String,
+                rawObject["ticker"] as? String,
+                rawType,
+                rawCat
+            ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+
+            let hasCallKeyword = containsCallKeyword(in: combinedTextFields)
 
             let isCallPayload =
                 rawType == "call" ||
-                rawType == "call_end" ||
-                rawType == "call_removed" ||
+                rawType.contains("call") ||
                 rawCat == "call" ||
+                rawCat.contains("call") ||
                 isOngoingCall ||
+                hasCallKeyword ||
                 rawObject["callState"] != nil ||
                 rawObject["callerName"] != nil ||
                 rawObject["phoneNumber"] != nil
 
             if isCallPayload {
-                let alert = try JSONDecoder().decode(CallAlert.self, from: data)
+                var alert = try JSONDecoder().decode(CallAlert.self, from: data)
+                // If matched via keyword or `type == "call"` / `cat == "call"` / `isOngoingCall == true`,
+                // ensure it rings unless explicitly marked removed/ended
+                let explicitlyEnded = rawType.contains("end") || rawType.contains("remove") ||
+                                      (rawObject["removed"] as? Bool == true) ||
+                                      (rawObject["isRemoved"] as? Bool == true)
+                if !explicitlyEnded && !alert.isRinging {
+                    alert = CallAlert(
+                        callerName: alert.callerName,
+                        phoneNumber: alert.phoneNumber,
+                        app: alert.app,
+                        callState: .ringing,
+                        receivedAt: alert.receivedAt
+                    )
+                }
                 return .callAlert(alert)
             }
 
             if rawObject["appName"] != nil || rawObject["app"] != nil ||
-               rawObject["title"] != nil || rawObject["body"] != nil || rawObject["text"] != nil {
+               rawObject["title"] != nil || rawObject["body"] != nil || rawObject["text"] != nil ||
+               rawObject["message"] != nil || rawObject["id"] != nil {
                 let notification = try JSONDecoder().decode(AndroidNotification.self, from: data)
                 return .notification(notification)
             }
         }
 
+        // Fallback: If raw string contains call indicators or keywords even with non-standard JSON formatting
+        let lowerJSON = jsonString.lowercased()
+        if lowerJSON.contains("\"type\":\"call\"") ||
+           lowerJSON.contains("\"type\": \"call\"") ||
+           lowerJSON.contains("\"cat\":\"call\"") ||
+           lowerJSON.contains("\"cat\": \"call\"") ||
+           lowerJSON.contains("\"isongoingcall\":true") ||
+           lowerJSON.contains("\"isongoingcall\": true") ||
+           containsCallKeyword(in: lowerJSON) {
+            let caller = extractJSONStringValue(from: jsonString, keys: ["title", "callerName", "sender", "name"]) ?? "Incoming Caller"
+            let app = extractJSONStringValue(from: jsonString, keys: ["app", "appName", "pkg"]) ?? "Phone"
+            let body = extractJSONStringValue(from: jsonString, keys: ["body", "text", "phoneNumber", "message"]) ?? "Incoming Call"
+            return .callAlert(CallAlert(callerName: caller, phoneNumber: body, app: app, callState: .ringing))
+        }
+
         throw BLEPayloadError.unrecognizedSchema(jsonString)
+    }
+
+    /// Lightweight regex-free key extractor for fallback decoding if Android sends slightly truncated/non-escaped JSON
+    static func extractJSONStringValue(from json: String, keys: [String]) -> String? {
+        for key in keys {
+            let patterns = ["\"\(key)\":\"", "\"\(key)\": \"", "\"\(key)\" : \""]
+            for pattern in patterns {
+                if let range = json.range(of: pattern, options: .caseInsensitive) {
+                    let remainder = json[range.upperBound...]
+                    if let endQuote = remainder.firstIndex(of: "\"") {
+                        let value = String(remainder[..<endQuote]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !value.isEmpty {
+                            return value
+                        }
+                    }
+                }
+            }
+        }
+        return nil
     }
 }
 

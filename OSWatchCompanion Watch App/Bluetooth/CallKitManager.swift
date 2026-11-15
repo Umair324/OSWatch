@@ -36,6 +36,9 @@ final class CallKitManager: NSObject {
     /// Callback invoked when the user taps Answer or Decline on the native iOS CallKit screen (or when it times out)
     var onUserCallResponse: ((UserCallResponse) -> Void)?
 
+    /// Callback invoked with human-readable CallKit status for the on-screen debug banner
+    var onCallKitStatusUpdate: ((String) -> Void)?
+
     // MARK: - Initialization
 
     override init() {
@@ -60,14 +63,17 @@ final class CallKitManager: NSObject {
     ///   - app: Extracted `app` / `appName` (e.g. `"Phone"` or `"WhatsApp"`)
     ///   - phoneNumber: Optional phone number or subtitle
     func reportIncomingCall(callerName: String, app: String, phoneNumber: String = "") {
+        let cleanCaller = callerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Unknown Caller" : callerName
+        let cleanApp = app.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Phone" : app
+
         let formattedCaller: String
-        if app.isEmpty || app.caseInsensitiveCompare("Phone") == .orderedSame {
-            formattedCaller = callerName
+        if cleanApp.caseInsensitiveCompare("Phone") == .orderedSame {
+            formattedCaller = cleanCaller
         } else {
-            formattedCaller = "\(callerName) (\(app))"
+            formattedCaller = "\(cleanCaller) (\(cleanApp))"
         }
 
-        let handleValue = !phoneNumber.isEmpty ? "\(phoneNumber) • \(app)" : "\(callerName) • \(app)"
+        let handleValue = !phoneNumber.isEmpty ? "\(phoneNumber) • \(cleanApp)" : "\(cleanCaller) • \(cleanApp)"
 
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: handleValue)
@@ -78,11 +84,20 @@ final class CallKitManager: NSObject {
         update.supportsUngrouping = false
         update.supportsDTMF = false
 
-        // If a CallKit session is already active, update its display metadata and refresh the 35s timeout
-        if let existingUUID = activeCallUUID {
+        // Verify with CXCallObserver whether a CallKit call is genuinely active right now
+        let systemActiveCalls = callController.callObserver.calls.filter { !$0.hasEnded }
+        if systemActiveCalls.isEmpty {
+            activeCallUUID = nil
+        }
+
+        // If a CallKit session is actively ringing on screen, update its display metadata and refresh the 35s timeout
+        if let existingUUID = activeCallUUID,
+           systemActiveCalls.contains(where: { $0.uuid == existingUUID }) {
             provider.reportCall(with: existingUUID, updated: update)
             scheduleAutoTimeout(for: existingUUID)
-            logger.info("Updated existing CallKit incoming call session (\(existingUUID.uuidString)) for \(formattedCaller)")
+            let msg = "CallKit Updated: \(formattedCaller)"
+            onCallKitStatusUpdate?(msg)
+            logger.info("\(msg) (\(existingUUID.uuidString))")
             return
         }
 
@@ -90,18 +105,23 @@ final class CallKitManager: NSObject {
         activeCallUUID = callUUID
 
         logger.info("Reporting new incoming CallKit call (\(callUUID.uuidString)): \(formattedCaller)")
+        onCallKitStatusUpdate?("Reporting to CallKit: \(formattedCaller)...")
 
         provider.reportNewIncomingCall(with: callUUID, update: update) { [weak self] error in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 if let error = error {
-                    self.logger.error("CallKit reportNewIncomingCall failed: \(error.localizedDescription)")
+                    let errMsg = "CallKit Error: \(error.localizedDescription)"
+                    self.logger.error("\(errMsg)")
+                    self.onCallKitStatusUpdate?(errMsg)
                     if self.activeCallUUID == callUUID {
                         self.activeCallUUID = nil
                     }
                     self.cancelAutoTimeout()
                 } else {
-                    self.logger.info("CallKit incoming call UI presented for \(formattedCaller)")
+                    let okMsg = "CallKit Ringing: \(formattedCaller)"
+                    self.logger.info("\(okMsg)")
+                    self.onCallKitStatusUpdate?(okMsg)
                     self.scheduleAutoTimeout(for: callUUID)
                 }
             }
@@ -114,20 +134,34 @@ final class CallKitManager: NSObject {
     /// when the 35s auto-timeout fires, or when dismissed in-app).
     func endActiveCall(reason: CXCallEndedReason = .declinedElsewhere) {
         cancelAutoTimeout()
-        guard let callUUID = activeCallUUID else { return }
+
+        let activeUUIDs: [UUID] = {
+            var list: [UUID] = []
+            if let current = activeCallUUID {
+                list.append(current)
+            }
+            for call in callController.callObserver.calls where !call.hasEnded && !list.contains(call.uuid) {
+                list.append(call.uuid)
+            }
+            return list
+        }()
+
         activeCallUUID = nil
+        guard !activeUUIDs.isEmpty else { return }
 
-        logger.info("Ending CallKit session \(callUUID.uuidString) with reason \(String(describing: reason.rawValue))")
-        provider.reportCall(with: callUUID, endedAt: Date(), reason: reason)
+        for callUUID in activeUUIDs {
+            logger.info("Ending CallKit session \(callUUID.uuidString) with reason \(String(describing: reason.rawValue))")
+            provider.reportCall(with: callUUID, endedAt: Date(), reason: reason)
 
-        // Also submit CXEndCallAction via CXCallController in case CallKit UI is still transitioning
-        let endAction = CXEndCallAction(call: callUUID)
-        let transaction = CXTransaction(action: endAction)
-        callController.request(transaction) { [weak self] error in
-            if let error = error {
-                self?.logger.debug("CXEndCallAction transaction completed after reportCall: \(error.localizedDescription)")
+            let endAction = CXEndCallAction(call: callUUID)
+            let transaction = CXTransaction(action: endAction)
+            callController.request(transaction) { [weak self] error in
+                if let error = error {
+                    self?.logger.debug("CXEndCallAction completed after reportCall: \(error.localizedDescription)")
+                }
             }
         }
+        onCallKitStatusUpdate?("CallKit Session Ended")
     }
 
     private func scheduleAutoTimeout(for callUUID: UUID) {
@@ -169,10 +203,9 @@ extension CallKitManager: CXProviderDelegate {
             cancelAutoTimeout()
             action.fulfill()
 
-            // Notify BLEPeripheralManager to send a BLE response packet back to Android and stop local ringing
+            onCallKitStatusUpdate?("Call Answered on iPhone")
             onUserCallResponse?(.answered)
 
-            // End the CallKit bridge session cleanly so the user is not stuck in a dummy audio call screen on iPhone
             activeCallUUID = nil
             provider.reportCall(with: callUUID, endedAt: Date(), reason: .declinedElsewhere)
         }
@@ -191,8 +224,8 @@ extension CallKitManager: CXProviderDelegate {
                 activeCallUUID = nil
             }
 
-            // Report call ended to CallKit and notify BLEPeripheralManager to send BLE response to Android
             provider.reportCall(with: callUUID, endedAt: Date(), reason: .declinedElsewhere)
+            onCallKitStatusUpdate?("Call Declined on iPhone")
             onUserCallResponse?(.declined)
         }
     }
@@ -211,6 +244,7 @@ final class CallKitManager {
 
     static let shared = CallKitManager()
     var onUserCallResponse: ((UserCallResponse) -> Void)?
+    var onCallKitStatusUpdate: ((String) -> Void)?
 
     func reportIncomingCall(callerName: String, app: String, phoneNumber: String = "") {}
     func endActiveCall() {}

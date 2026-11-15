@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Tab 1: Status & Pairing Screen
 /// Displays a glowing status ring (`Connected` vs `Advertising`), a toggle switch to start/stop BLE broadcasting,
-/// and dual circular battery gauges (`Watch/iPhone %` & `Android Phone %`).
+/// dual circular battery gauges (`Watch/iPhone %` & `Android Phone %`), and the live on-screen BLE JSON & CallKit debug banner.
 struct StatusPairingView: View {
     @EnvironmentObject private var bleManager: BLEPeripheralManager
     @State private var pulseAnimation: Bool = false
@@ -11,8 +11,8 @@ struct StatusPairingView: View {
     private let ringOuterSize: CGFloat = 82
     private let ringInnerSize: CGFloat = 74
     #else
-    private let ringOuterSize: CGFloat = 148
-    private let ringInnerSize: CGFloat = 132
+    private let ringOuterSize: CGFloat = 140
+    private let ringInnerSize: CGFloat = 124
     #endif
 
     var body: some View {
@@ -27,8 +27,8 @@ struct StatusPairingView: View {
                 // 3. BLE Broadcast Toggle Switch
                 broadcastToggleCard
 
-                // 4. Live GATT Telemetry & Demo Trigger Bar
-                diagnosticsAndSimulatorSection
+                // 4. On-Screen BLE JSON & CallKit Debug Banner + Demo Buttons
+                bleDebugBannerSection
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 16)
@@ -145,22 +145,71 @@ struct StatusPairingView: View {
         )
     }
 
-    // MARK: - Diagnostics & Test Controls
+    // MARK: - On-Screen BLE JSON Debug Banner & Demo Triggers
 
-    private var diagnosticsAndSimulatorSection: some View {
-        VStack(spacing: 8) {
-            Text(bleManager.lastEventLog)
-                .font(.system(size: 11, design: .monospaced))
+    private var bleDebugBannerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Header row with packet counter & CallKit status
+            HStack {
+                Label("BLE RX Debug (6E400002)", systemImage: "terminal.fill")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.cyan)
+
+                Spacer()
+
+                Text("Pkts: \(bleManager.receivedPacketCount)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.cyan.opacity(0.2)))
+                    .foregroundStyle(.cyan)
+            }
+
+            // CallKit Status Line
+            HStack(spacing: 5) {
+                Image(systemName: "phone.badge.waveform.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.green)
+                Text(bleManager.latestCallKitStatus)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.green)
+                    .lineLimit(2)
+            }
+
+            // Latest Reassembled BLE JSON String Box
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Latest Reassembled BLE JSON:")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(bleManager.latestReceivedBLEJSON)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.black.opacity(0.65))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.cyan.opacity(0.35), lineWidth: 1)
+                    )
+            }
+
+            // Event log line
+            Text("Event: \(bleManager.lastEventLog)")
+                .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .truncationMode(.tail)
 
+            // Demo Msg & Demo Call (CallKit) buttons
             HStack(spacing: 8) {
                 Button {
                     bleManager.simulateChunkedNotification()
                 } label: {
-                    Label("Test Msg", systemImage: "bell.badge.fill")
-                        .font(.system(size: 11, weight: .medium))
+                    Label("Demo Msg", systemImage: "bell.badge.fill")
+                        .font(.system(size: 11, weight: .semibold))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -169,15 +218,19 @@ struct StatusPairingView: View {
                 Button {
                     bleManager.simulateIncomingCall()
                 } label: {
-                    Label("Test Call", systemImage: "phone.down.waves.left.and.right")
-                        .font(.system(size: 11, weight: .medium))
+                    Label("Demo Call", systemImage: "phone.down.waves.left.and.right")
+                        .font(.system(size: 11, weight: .semibold))
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .tint(.green)
             }
         }
-        .padding(.top, 2)
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.white.opacity(0.08))
+        )
     }
 
     // MARK: - Helpers

@@ -15,6 +15,11 @@ targets:
           - "Info.plist"
     info:
       path: "OSWatchCompanion iOS/Info.plist"
+    dependencies:
+      - sdk: CallKit.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreBluetooth.framework
+      - sdk: AudioToolbox.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oswatch.companion.ios
@@ -39,6 +44,9 @@ targets:
           - "Info.plist"
     info:
       path: "OSWatchCompanion Watch App/Info.plist"
+    dependencies:
+      - sdk: CoreBluetooth.framework
+      - sdk: WatchKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oswatch.companion.watchkitapp

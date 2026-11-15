@@ -157,6 +157,20 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
     /// Diagnostic status message for packet reassembly and GATT events
     @Published private(set) var lastEventLog: String = "Initializing CoreBluetooth..."
 
+    // MARK: - On-Screen BLE JSON & CallKit Debug Banner State
+
+    /// Full reassembled JSON string most recently received on `6E400002-B5A3-F393-E0A9-E50E24DCCA9E`
+    @Published private(set) var latestReceivedBLEJSON: String = "Waiting for BLE JSON on 6E400002..."
+
+    /// Latest raw BLE write chunk string received before/during reassembly
+    @Published private(set) var latestReceivedRawChunk: String = "No BLE chunks received yet"
+
+    /// Latest CallKit provider status message
+    @Published private(set) var latestCallKitStatus: String = "CallKit Ready"
+
+    /// Total count of BLE write packets received on `6E400002`
+    @Published private(set) var receivedPacketCount: Int = 0
+
     // MARK: - Private CoreBluetooth & CallKit Properties
 
     private let logger = Logger(subsystem: "com.oswatch.companion", category: "BLEPeripheralManager")
@@ -191,6 +205,10 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
     // MARK: - Setup & Configuration
 
     private func configureCallKitCallbacks() {
+        callKitManager.onCallKitStatusUpdate = { [weak self] status in
+            self?.latestCallKitStatus = status
+        }
+
         callKitManager.onUserCallResponse = { [weak self] response in
             guard let self = self else { return }
             self.stopCallRingingHaptics()
@@ -225,7 +243,6 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
         PlatformDeviceBridge.enableBatteryMonitoring()
         refreshWatchBatteryLevel()
 
-        // Poll battery level every 30 seconds to keep the gauge & GATT Read value up to date
         batteryMonitorTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshWatchBatteryLevel()
@@ -436,40 +453,72 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
         sendCommand(.declineCall)
     }
 
-    // MARK: - Incoming Payload Handling, CallKit & Haptics
+    // MARK: - Unified CallKit Trigger & Incoming Payload Handler
 
-    private func handleDecodedPayload(_ payload: IncomingBLEPayload) {
+    /// Single unified entry point that triggers `CallKitManager.shared.reportIncomingCall(...)`,
+    /// sets the in-app `activeCallAlert`, and starts ringing haptics.
+    /// Used identically by both the Demo Call button and live BLE payloads from Android (`6E400002`).
+    func triggerCallKitIncomingCall(callerName: String, app: String, phoneNumber: String) {
+        let alert = CallAlert(
+            callerName: callerName,
+            phoneNumber: phoneNumber,
+            app: app,
+            callState: .ringing
+        )
+        activeCallAlert = alert
+        lastEventLog = "Call (\(alert.app)): \(alert.callerName)"
+        latestCallKitStatus = "Triggering CallKit: \(alert.callerName) (\(alert.app))"
+
+        callKitManager.reportIncomingCall(
+            callerName: alert.callerName,
+            app: alert.app,
+            phoneNumber: alert.phoneNumber
+        )
+        startCallRingingHaptics()
+    }
+
+    /// Processes a reassembled BLE payload and routes any call (`type == "call"`, `cat == "call"`, `isOngoingCall == true`,
+    /// or call keywords `incoming call`, `voice call`, `video call`, `ringing`, `is calling`) directly to `triggerCallKitIncomingCall`.
+    private func handleDecodedPayload(_ payload: IncomingBLEPayload, rawJSON: String) {
+        latestReceivedBLEJSON = rawJSON
+
         switch payload {
+        case .callAlert(let callAlert):
+            logger.info("Decoded CallAlert payload: \(callAlert.callerName) via \(callAlert.app) (\(callAlert.callState.rawValue))")
+
+            if callAlert.isRinging {
+                triggerCallKitIncomingCall(
+                    callerName: callAlert.callerName,
+                    app: callAlert.app,
+                    phoneNumber: callAlert.phoneNumber
+                )
+            } else {
+                stopCallRingingHaptics()
+                activeCallAlert = nil
+                callKitManager.endActiveCall()
+                lastEventLog = "Call ended: \(callAlert.callerName)"
+                latestCallKitStatus = "Call Ended: \(callAlert.callerName)"
+            }
+
         case .notification(let notification):
+            // Double-check if the notification title/body/rawJSON contains any call keyword
+            let combined = "\(notification.appName) \(notification.title) \(notification.body) \(rawJSON)"
+            if IncomingBLEPayload.containsCallKeyword(in: combined) {
+                logger.info("Notification matched call keyword; promoting to CallKit incoming call: \(notification.title)")
+                triggerCallKitIncomingCall(
+                    callerName: notification.title,
+                    app: notification.appName,
+                    phoneNumber: notification.body
+                )
+                return
+            }
+
             notifications.removeAll { $0.id == notification.id }
             notifications.insert(notification, at: 0)
 
             PlatformDeviceBridge.playHaptic(.notification)
             lastEventLog = "Notification from \(notification.appName)"
             logger.info("Received Android notification [\(notification.appName)]: \(notification.title)")
-
-        case .callAlert(let callAlert):
-            logger.info("Received Android call payload: \(callAlert.callerName) via \(callAlert.app) (\(callAlert.callState.rawValue))")
-            lastEventLog = "Call (\(callAlert.app)): \(callAlert.callerName)"
-
-            if callAlert.isRinging {
-                activeCallAlert = callAlert
-
-                // Trigger native iOS CallKit incoming call screen & ringtone (even when iPhone is locked)
-                callKitManager.reportIncomingCall(
-                    callerName: callAlert.callerName,
-                    app: callAlert.app,
-                    phoneNumber: callAlert.phoneNumber
-                )
-
-                startCallRingingHaptics()
-            } else {
-                // Call ended or removed on Android -> close CallKit screen and stop ringing
-                stopCallRingingHaptics()
-                activeCallAlert = nil
-                callKitManager.endActiveCall()
-                lastEventLog = "Call ended: \(callAlert.callerName)"
-            }
         }
     }
 
@@ -477,7 +526,6 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
         stopCallRingingHaptics()
         PlatformDeviceBridge.playHaptic(.ring)
 
-        // Repeat ring haptic every 2.0 seconds while callState == "RINGING"
         callHapticTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self, self.activeCallAlert?.isRinging == true else {
@@ -553,10 +601,10 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
         let chunk3 = #"3/3|"timestamp":\#(timestampMs)}"#
 
         do {
-            _ = try packetReassembler.ingest(chunkString: chunk1, from: "simulator")
-            _ = try packetReassembler.ingest(chunkString: chunk2, from: "simulator")
-            if let payload = try packetReassembler.ingest(chunkString: chunk3, from: "simulator") {
-                handleDecodedPayload(payload)
+            _ = try packetReassembler.ingestPacket(chunkString: chunk1, from: "simulator")
+            _ = try packetReassembler.ingestPacket(chunkString: chunk2, from: "simulator")
+            if let reassembled = try packetReassembler.ingestPacket(chunkString: chunk3, from: "simulator") {
+                handleDecodedPayload(reassembled.payload, rawJSON: reassembled.jsonString)
             }
             if androidBatteryPercent == nil {
                 androidBatteryPercent = 76
@@ -566,17 +614,22 @@ final class BLEPeripheralManager: NSObject, ObservableObject {
         }
     }
 
-    /// Simulates a chunked Android BLE bridge call payload (`"type": "call"`, `"cat": "call"`, `"isOngoingCall": true`)
-    /// to test native iOS CallKit full-screen UI and ringtone.
+    /// Demo Call button handler: feeds a 2-chunk Android BLE bridge call payload through `packetReassembler`
+    /// and invokes the exact same `handleDecodedPayload` -> `triggerCallKitIncomingCall` path as live BLE writes!
     func simulateIncomingCall() {
         let chunk1 = #"1/2|{"type":"call","cat":"call","isOngoingCall":true,"app":"WhatsApp","#
-        let chunk2 = #"2/2|"title":"Sarah Jenkins","body":"+1 (415) 890-4321"}"#
+        let chunk2 = #"2/2|"title":"Sarah Jenkins","body":"Incoming voice call"}"#
 
-        if let payload = try? packetReassembler.ingest(chunkString: chunk1, from: "simulator") {
-            handleDecodedPayload(payload)
-        }
-        if let payload = try? packetReassembler.ingest(chunkString: chunk2, from: "simulator") {
-            handleDecodedPayload(payload)
+        latestReceivedRawChunk = chunk2
+
+        do {
+            _ = try packetReassembler.ingestPacket(chunkString: chunk1, from: "simulator")
+            if let reassembled = try packetReassembler.ingestPacket(chunkString: chunk2, from: "simulator") {
+                handleDecodedPayload(reassembled.payload, rawJSON: reassembled.jsonString)
+            }
+        } catch {
+            logger.error("Demo Call error: \(error.localizedDescription)")
+            triggerCallKitIncomingCall(callerName: "Sarah Jenkins", app: "WhatsApp", phoneNumber: "Incoming voice call")
         }
     }
 }
@@ -748,10 +801,15 @@ extension BLEPeripheralManager: CBPeripheralManagerDelegate {
 
                 switch request.characteristic.uuid {
                 case GATTConstants.rxCharacteristicUUID:
+                    receivedPacketCount += 1
+                    let rawChunkText = String(decoding: value, as: UTF8.self)
+                        .replacingOccurrences(of: "\0", with: "")
+                    latestReceivedRawChunk = rawChunkText
+
                     do {
                         let sourceID = request.central.identifier.uuidString
-                        if let completedPayload = try packetReassembler.ingest(data: value, from: sourceID) {
-                            handleDecodedPayload(completedPayload)
+                        if let reassembled = try packetReassembler.ingestPacket(data: value, from: sourceID) {
+                            handleDecodedPayload(reassembled.payload, rawJSON: reassembled.jsonString)
                         } else {
                             let bufferedCount = packetReassembler.bufferedChunkCount(for: sourceID)
                             lastEventLog = "Buffering chunk (\(bufferedCount) parts)..."
@@ -759,8 +817,33 @@ extension BLEPeripheralManager: CBPeripheralManagerDelegate {
                         peripheral.respond(to: request, withResult: .success)
                     } catch {
                         logger.error("Packet reassembly error: \(error.localizedDescription)")
-                        lastEventLog = "Malformed BLE packet"
-                        peripheral.respond(to: request, withResult: .unlikelyError)
+                        latestReceivedBLEJSON = rawChunkText
+                        lastEventLog = "Parse fallback on packet #\(receivedPacketCount)"
+
+                        // Emergency fallback: If raw text contains call flags or keywords, trigger CallKit immediately!
+                        let lower = rawChunkText.lowercased()
+                        if lower.contains("\"type\":\"call\"") ||
+                           lower.contains("\"type\": \"call\"") ||
+                           lower.contains("\"cat\":\"call\"") ||
+                           lower.contains("\"cat\": \"call\"") ||
+                           lower.contains("\"isongoingcall\":true") ||
+                           lower.contains("\"isongoingcall\": true") ||
+                           IncomingBLEPayload.containsCallKeyword(in: lower) {
+                            let caller = IncomingBLEPayload.extractJSONStringValue(
+                                from: rawChunkText,
+                                keys: ["title", "callerName", "sender", "name"]
+                            ) ?? "Incoming Call"
+                            let app = IncomingBLEPayload.extractJSONStringValue(
+                                from: rawChunkText,
+                                keys: ["app", "appName", "pkg"]
+                            ) ?? "Phone"
+                            let phone = IncomingBLEPayload.extractJSONStringValue(
+                                from: rawChunkText,
+                                keys: ["body", "text", "phoneNumber", "message"]
+                            ) ?? "Incoming Call"
+                            triggerCallKitIncomingCall(callerName: caller, app: app, phoneNumber: phone)
+                        }
+                        peripheral.respond(to: request, withResult: .success)
                     }
 
                 case GATTConstants.batteryCharacteristicUUID:
